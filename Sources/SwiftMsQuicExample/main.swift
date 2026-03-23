@@ -292,43 +292,48 @@ struct App {
             failAndExit("[Client] Datagram echo timeout (2s)")
         }
         
-        let stream = try connection.openStream(flags: .none)
-        try await stream.start()
-        print("[Client] Stream started")
-        
-        let message = "Hello MsQuic Swift!"
-        let expectedStreamEcho = Data(message.utf8)
-        print("[Client] Sending: \(message)")
-        try await stream.send(Data(message.utf8), flags: .fin) // Send FIN to indicate end of write
-        
-        print("[Client] Waiting for echo...")
-        let receivedStreamEcho = try await withThrowingTaskGroup(of: Data?.self) { group in
-            group.addTask {
-                var received = Data()
-                for try await data in stream.receive {
-                    let msg = String(data: data, encoding: .utf8) ?? "?"
-                    print("[Client] Echo received: \(msg)")
-                    received.append(data)
-                    if received.count >= expectedStreamEcho.count {
-                        break
+        do {
+            let stream = try connection.openStream(flags: .none)
+            try await stream.start()
+            print("[Client] Stream started")
+            
+            let message = "Hello MsQuic Swift!"
+            let expectedStreamEcho = Data(message.utf8)
+            print("[Client] Sending: \(message)")
+            try await stream.send(Data(message.utf8), flags: .fin) // Send FIN to indicate end of write
+            
+            print("[Client] Waiting for echo...")
+            let receivedStreamEcho = try await withThrowingTaskGroup(of: Data?.self) { group in
+                group.addTask {
+                    var received = Data()
+                    for try await data in stream.receive {
+                        let msg = String(data: data, encoding: .utf8) ?? "?"
+                        print("[Client] Echo received: \(msg)")
+                        received.append(data)
+                        if received.count >= expectedStreamEcho.count {
+                            break
+                        }
                     }
+                    return received
                 }
-                return received
-            }
-            group.addTask {
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-                return nil
-            }
+                group.addTask {
+                    try? await Task.sleep(nanoseconds: 2_000_000_000)
+                    return nil
+                }
 
-            let first = try await group.next() ?? nil
-            group.cancelAll()
-            return first
+                let first = try await group.next() ?? nil
+                group.cancelAll()
+                return first
+            }
+            guard let receivedStreamEcho else {
+                failAndExit("[Client] Stream echo timeout (2s)")
+            }
+            assertOrExit(receivedStreamEcho == expectedStreamEcho, "Stream echo mismatch")
+            print("[Client] Stream finished")
+
+            await stream.shutdown(flags: .graceful)
+            print("[Client] Stream shutdown complete")
         }
-        guard let receivedStreamEcho else {
-            failAndExit("[Client] Stream echo timeout (2s)")
-        }
-        assertOrExit(receivedStreamEcho == expectedStreamEcho, "Stream echo mismatch")
-        print("[Client] Stream finished")
         
         datagramContinuation.finish()
         await connection.shutdown()
