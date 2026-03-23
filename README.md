@@ -76,18 +76,27 @@ func runClient() async throws {
     try connection.setStreamSchedulingScheme(.roundRobin)
     
     // 3. Open Stream & Send Data
-    let stream = try connection.openStream(flags: .none)
-    try await stream.start()
-    try stream.setPriority(0x9000) // 0xFFFF is highest priority
-    
-    try await stream.send(Data("Hello".utf8), flags: .fin)
-    
-    // 4. Receive Data
-    for try await data in stream.receive {
-        print("Received: \(String(decoding: data, as: UTF8.self))")
+    do {
+        let stream = try connection.openStream(flags: .none)
+        try await stream.start()
+        try stream.setPriority(0x9000) // 0xFFFF is highest priority
+
+        try await stream.send(Data("Hello".utf8), flags: .fin)
+
+        // 4. Receive Data
+        for try await data in stream.receive {
+            print("Received: \(String(decoding: data, as: UTF8.self))")
+        }
+
+        await stream.shutdown(flags: .graceful)
     }
+
+    // 5. Shutdown Connection
+    await connection.shutdown()
 }
 ```
+
+Locally opened streams should be released before you expect transport resources to be fully closed. `await connection.shutdown()` waits for the transport shutdown event, but `ConnectionClose` still happens from `deinit`.
 
 ### 3. Server Example
 
@@ -114,12 +123,14 @@ func runServer() async throws {
     listener.onNewConnection { listener, info in
         let connection = try QuicConnection(handle: info.connection, configuration: config) { conn, stream, flags in
             // Handle new streams
-            Task {
+            do {
                 for try await data in stream.receive {
                     // Echo back
                     try await stream.send(data)
                 }
                 await stream.shutdown(flags: .graceful)
+            } catch {
+                print("Stream error: \(error)")
             }
         }
         return connection

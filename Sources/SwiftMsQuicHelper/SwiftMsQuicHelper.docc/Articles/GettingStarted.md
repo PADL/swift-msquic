@@ -55,21 +55,27 @@ try await connection.start(
 try connection.setStreamSchedulingScheme(.roundRobin)
 
 // Open a stream and send data
-let stream = try connection.openStream()
-try await stream.start()
-try stream.setPriority(0x9000) // 0xFFFF is highest priority
+do {
+    let stream = try connection.openStream()
+    try await stream.start()
+    try stream.setPriority(0x9000) // 0xFFFF is highest priority
 
-let message = "Hello, QUIC!"
-try await stream.send(Data(message.utf8), flags: .fin)
+    let message = "Hello, QUIC!"
+    try await stream.send(Data(message.utf8), flags: .fin)
 
-// Receive the response
-for try await data in stream.receive {
-    print("Received: \(String(data: data, encoding: .utf8) ?? "?")")
+    // Receive the response
+    for try await data in stream.receive {
+        print("Received: \(String(data: data, encoding: .utf8) ?? "?")")
+    }
+
+    await stream.shutdown(flags: .graceful)
 }
 
 // Clean up
 await connection.shutdown()
 ```
+
+Release locally opened streams before assuming transport resources are fully closed. `await connection.shutdown()` waits for the transport shutdown event, while `ConnectionClose` still runs from `deinit`.
 
 ## Create a Server Listener
 
@@ -111,9 +117,14 @@ listener.onNewConnection { listener, info in
         configuration: configuration
     ) { conn, stream, flags in
         // Handle incoming streams
-        for try await data in stream.receive {
-            print("Received: \(String(data: data, encoding: .utf8) ?? "?")")
-            try await stream.send(data) // Echo back
+        do {
+            for try await data in stream.receive {
+                print("Received: \(String(data: data, encoding: .utf8) ?? "?")")
+                try await stream.send(data) // Echo back
+            }
+            await stream.shutdown(flags: .graceful)
+        } catch {
+            print("Stream error: \(error)")
         }
     }
 
