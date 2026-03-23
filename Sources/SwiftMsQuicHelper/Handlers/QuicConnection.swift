@@ -109,11 +109,17 @@ public final class QuicConnection: QuicObject, @unchecked Sendable {
     private struct InternalState: @unchecked Sendable {
         var connectionState: State = .idle
         var connectContinuation: CheckedContinuation<Void, Error>?
-        var shutdownContinuation: CheckedContinuation<Void, Never>?
+        var shutdownContinuations: [CheckedContinuation<Void, Never>] = []
         var peerStreamHandler: StreamHandler?
         var eventHandler: EventHandler?
         var certificateValidationHandler: CertificateValidationHandler?
         var datagramSendContexts: Set<UInt> = []
+    }
+
+    private enum ShutdownAction {
+        case resumeImmediately
+        case waitForExistingShutdown
+        case startShutdown
     }
     
     private let internalState = OSAllocatedUnfairLock(initialState: InternalState())
@@ -312,28 +318,42 @@ public final class QuicConnection: QuicObject, @unchecked Sendable {
     ///
     /// This method initiates a graceful shutdown of the connection. All active streams
     /// will be closed, and the connection will be terminated after the shutdown completes.
+    /// The underlying `ConnectionClose` still runs from `deinit`, so callers must release
+    /// their strong references after this returns for transport resources to be fully freed.
     ///
     /// - Parameter errorCode: An optional application-defined error code to send to the peer.
     public func shutdown(errorCode: UInt64 = 0) async {
         guard let handle = handle else { return }
-        
-        let shouldReturn = internalState.withLock { state -> Bool in
-            if state.connectionState == .closed { return true }
-            state.connectionState = .shuttingDown
-            return false
-        }
-        if shouldReturn { return }
-        
+
         await withCheckedContinuation { continuation in
-            internalState.withLock {
-                $0.shutdownContinuation = continuation
+            let action = internalState.withLock { state -> ShutdownAction in
+                switch state.connectionState {
+                case .closed:
+                    return .resumeImmediately
+                case .shuttingDown:
+                    state.shutdownContinuations.append(continuation)
+                    return .waitForExistingShutdown
+                default:
+                    state.connectionState = .shuttingDown
+                    state.shutdownContinuations.append(continuation)
+                    return .startShutdown
+                }
             }
-            
-            api.ConnectionShutdown(
-                handle,
-                QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
-                errorCode
-            )
+
+            switch action {
+            case .resumeImmediately:
+                continuation.resume()
+
+            case .waitForExistingShutdown:
+                break
+
+            case .startShutdown:
+                api.ConnectionShutdown(
+                    handle,
+                    QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+                    errorCode
+                )
+            }
         }
     }
 
@@ -717,15 +737,15 @@ public final class QuicConnection: QuicObject, @unchecked Sendable {
             continuation?.resume(throwing: QuicError.aborted)
             
         case .shutdownComplete:
-            let (shutdownContinuation, connectContinuation, datagramSendContexts) = internalState.withLock {
+            let (shutdownContinuations, connectContinuation, datagramSendContexts) = internalState.withLock {
                 state -> (
-                    CheckedContinuation<Void, Never>?,
+                    [CheckedContinuation<Void, Never>],
                     CheckedContinuation<Void, Error>?,
                     [UInt]
                 ) in
                 state.connectionState = .closed
-                let sc = state.shutdownContinuation
-                state.shutdownContinuation = nil
+                let shutdownContinuations = state.shutdownContinuations
+                state.shutdownContinuations.removeAll()
 
                 let cc = state.connectContinuation
                 state.connectContinuation = nil
@@ -733,7 +753,7 @@ public final class QuicConnection: QuicObject, @unchecked Sendable {
                 let contexts = Array(state.datagramSendContexts)
                 state.datagramSendContexts.removeAll()
 
-                return (sc, cc, contexts)
+                return (shutdownContinuations, cc, contexts)
             }
             for contextToken in datagramSendContexts {
                 guard let contextPtr = UnsafeMutableRawPointer(bitPattern: contextToken) else {
@@ -745,7 +765,9 @@ public final class QuicConnection: QuicObject, @unchecked Sendable {
             // Release self-ref synchronously before resuming continuations.
             // The caller still holds a strong reference, so deinit won't fire on the callback thread.
             self.releaseSelfFromCallback()
-            shutdownContinuation?.resume()
+            for continuation in shutdownContinuations {
+                continuation.resume()
+            }
             connectContinuation?.resume(throwing: QuicError.aborted)
 
         case .datagramSendStateChanged(let state, let context):
@@ -807,10 +829,21 @@ public final class QuicConnection: QuicObject, @unchecked Sendable {
     }
     
     deinit {
-        let datagramSendContexts = internalState.withLock { state -> [UInt] in
+        let (shutdownContinuations, connectContinuation, datagramSendContexts) = internalState.withLock {
+            state -> (
+                [CheckedContinuation<Void, Never>],
+                CheckedContinuation<Void, Error>?,
+                [UInt]
+            ) in
+            let shutdownContinuations = state.shutdownContinuations
+            state.shutdownContinuations.removeAll()
+
+            let connectContinuation = state.connectContinuation
+            state.connectContinuation = nil
+
             let contexts = Array(state.datagramSendContexts)
             state.datagramSendContexts.removeAll()
-            return contexts
+            return (shutdownContinuations, connectContinuation, contexts)
         }
         for contextToken in datagramSendContexts {
             guard let contextPtr = UnsafeMutableRawPointer(bitPattern: contextToken) else {
@@ -819,6 +852,10 @@ public final class QuicConnection: QuicObject, @unchecked Sendable {
             let sendContext = Unmanaged<DatagramSendContext>.fromOpaque(contextPtr).takeRetainedValue()
             sendContext.continuation.resume(throwing: QuicError.aborted)
         }
+        for continuation in shutdownContinuations {
+            continuation.resume()
+        }
+        connectContinuation?.resume(throwing: QuicError.aborted)
 
         if let handle = handle {
             api.ConnectionClose(handle)

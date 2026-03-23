@@ -87,8 +87,15 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
     /// The connection this stream belongs to, if known.
     ///
     /// This is `nil` for streams received from a peer, as they are created
-    /// with just the handle.
-    public let connection: QuicConnection?
+    /// with just the handle. For locally opened streams, this is a weak
+    /// back-reference, so keep the connection strongly retained elsewhere for
+    /// the lifetime of the stream.
+    public private(set) weak var connection: QuicConnection?
+
+    private enum ShutdownAction {
+        case resumeImmediately
+        case call(previousState: State)
+    }
     
     private class SendContext {
         let continuation: CheckedContinuation<Void, Error>
@@ -315,20 +322,19 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
         guard let handle = handle else { return }
 
         await withCheckedContinuation { continuation in
-            var previousState: State? = nil
-            let shouldCall = internalState.withLock { state -> Bool in
+            let action = internalState.withLock { state -> ShutdownAction in
                 switch state.streamState {
                 case .closed, .shuttingDown:
-                    return false
+                    return .resumeImmediately
                 default:
-                    previousState = state.streamState
+                    let previousState = state.streamState
                     state.shutdownContinuation = continuation
                     state.streamState = .shuttingDown
-                    return true
+                    return .call(previousState: previousState)
                 }
             }
 
-            guard shouldCall else {
+            guard case .call(let previousState) = action else {
                 continuation.resume()
                 return
             }
@@ -345,9 +351,7 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
                 let continuationToResume = internalState.withLock { state -> CheckedContinuation<Void, Never>? in
                     let c = state.shutdownContinuation
                     state.shutdownContinuation = nil
-                    if let previousState {
-                        state.streamState = previousState
-                    }
+                    state.streamState = previousState
                     return c
                 }
                 continuationToResume?.resume()
