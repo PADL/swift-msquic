@@ -98,11 +98,11 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
     }
     
     private class SendContext {
-        let continuation: CheckedContinuation<Void, Error>
+        let continuation: CheckedContinuation<Void, Error>?
         let buffer: UnsafeMutableRawBufferPointer
         let quicBuffer: UnsafeMutablePointer<QUIC_BUFFER>
-        
-        init(_ c: CheckedContinuation<Void, Error>, data: Data) {
+
+        init(_ c: CheckedContinuation<Void, Error>?, data: Data) {
             self.continuation = c
             self.buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: data.count, alignment: 1)
             if data.count > 0 {
@@ -263,6 +263,38 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
         }
     }
 
+    /// Sends data on the stream without waiting for completion.
+    ///
+    /// Unlike ``send(_:flags:)-async``, this method returns immediately after queuing the data
+    /// to MsQuic. The buffer is automatically freed when MsQuic fires the send-complete callback.
+    /// MsQuic guarantees FIFO ordering, so multiple calls to this method will be sent in order.
+    ///
+    /// - Parameters:
+    ///   - data: The data to send.
+    ///   - flags: Flags controlling send behavior. Use `.fin` to indicate this is the last send.
+    /// - Throws: ``QuicError`` if the send cannot be queued.
+    public func send(_ data: Data, flags: QuicSendFlags = .none) throws {
+        guard let handle = handle else { throw QuicError.invalidState }
+
+        let context = SendContext(nil, data: data)
+        let contextPtr = Unmanaged.passRetained(context).toOpaque()
+
+        let status = QuicStatus(
+            api.StreamSend(
+                handle,
+                context.quicBuffer,
+                1,
+                QUIC_SEND_FLAGS(flags.rawValue),
+                contextPtr
+            )
+        )
+
+        if status.failed {
+            let _ = Unmanaged<SendContext>.fromOpaque(contextPtr).takeRetainedValue()
+            throw QuicError(status: status)
+        }
+    }
+
     /// Sets the stream priority for send scheduling.
     ///
     /// Higher values are sent before lower values. Valid range is `0...0xFFFF`.
@@ -388,10 +420,12 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
         case .sendComplete(let canceled, let context):
             if let context = context {
                 let sendContext = Unmanaged<SendContext>.fromOpaque(context).takeRetainedValue()
-                if canceled {
-                    sendContext.continuation.resume(throwing: QuicError.aborted)
-                } else {
-                    sendContext.continuation.resume()
+                if let continuation = sendContext.continuation {
+                    if canceled {
+                        continuation.resume(throwing: QuicError.aborted)
+                    } else {
+                        continuation.resume()
+                    }
                 }
             }
             
