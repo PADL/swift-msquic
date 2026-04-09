@@ -21,13 +21,13 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "MsQuic",
-            url: "https://github.com/team-unstablers/msquic/releases/download/v2.5.6-tuvariant%2B260331/MsQuic-2.5.6-tuvariant+260331-RELEASE-darwin-multiarch-static-unsigned.zip",
-            checksum: "28596ea8cc7f2292b5841d89e4bf5006ee7f51822b1e560dcfdc4916e84c9f47",
+            url: "https://github.com/team-unstablers/msquic/releases/download/v2.5.6-tuvariant%2B260410/MsQuic-2.5.6-tuvariant+260410-RELEASE-darwin-multiarch-static-unsigned.zip",
+            checksum: "ed33b891aa22e99f725f946ea232a24fdfaa1b971b27c9b8be43031a1f9f35f9",
         ),
         .binaryTarget(
             name: "MsQuicDebug",
-            url: "https://github.com/team-unstablers/msquic/releases/download/v2.5.6-tuvariant%2B260331/MsQuic-2.5.6-tuvariant+260331-DEBUG-darwin-multiarch-static-unsigned.zip",
-            checksum: "41842c565b5f9a714ce6a964216ad8486596abaf767bd49ea3294152b2a6edf7",
+            url: "https://github.com/team-unstablers/msquic/releases/download/v2.5.6-tuvariant%2B260410/MsQuic-2.5.6-tuvariant+260410-DEBUG-darwin-multiarch-static-unsigned.zip",
+            checksum: "37e0bccb528c9beec8dfeb7e67924f1d86a00f982c2227ce358dd3e0ca0fe4ae",
         ),
         .target(
             name: "SwiftMsQuicOpenSSLUtils",
