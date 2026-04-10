@@ -106,21 +106,23 @@ public final class QuicListener: QuicObject, @unchecked Sendable {
     /// - Throws: ``QuicError`` if the listener cannot be started.
     public func start(alpnBuffers: [String], localAddress: QuicAddress? = nil) throws {
         guard let handle = handle else { throw QuicError.invalidState }
-        
+
         let alpnQuicBuffers = alpnBuffers.map { QuicBuffer($0) }
-        
+
         try withQuicBufferArray(alpnQuicBuffers) { buffersPtr, bufferCount in
-            try localAddress?.withUnsafeAddress { addrPtr in
-                let status = QuicStatus(
-                    api.ListenerStart(
-                        handle,
-                        buffersPtr,
-                        bufferCount,
-                        addrPtr
+            if let localAddress {
+                try localAddress.withUnsafeAddress { addrPtr in
+                    let status = QuicStatus(
+                        api.ListenerStart(
+                            handle,
+                            buffersPtr,
+                            bufferCount,
+                            addrPtr
+                        )
                     )
-                )
-                try status.throwIfFailed()
-            } ?? {
+                    try status.throwIfFailed()
+                }
+            } else {
                 let status = QuicStatus(
                     api.ListenerStart(
                         handle,
@@ -130,7 +132,7 @@ public final class QuicListener: QuicObject, @unchecked Sendable {
                     )
                 )
                 try status.throwIfFailed()
-            }()
+            }
         }
     }
     
@@ -204,6 +206,19 @@ public final class QuicListener: QuicObject, @unchecked Sendable {
     }
     
     deinit {
+        // Drain any pending stop continuation before closing the handle.
+        // `stop()` stores a continuation and then calls `ListenerStop`, which
+        // eventually fires `.stopComplete`. If the listener is deallocated
+        // before that event is delivered (e.g. the caller drops the listener
+        // without waiting for `stop()`), the continuation would leak.
+        let pending = internalState.withLock {
+            state -> CheckedContinuation<Void, Never>? in
+            let c = state.stopContinuation
+            state.stopContinuation = nil
+            return c
+        }
+        pending?.resume()
+
         if let handle = handle {
             api.ListenerClose(handle)
         }

@@ -71,11 +71,19 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
         case closed
     }
     
-    private struct InternalState: Sendable {
+    /// Mutable state protected by the `internalState` lock.
+    ///
+    /// Marked `@unchecked Sendable` because the struct stores
+    /// `CheckedContinuation` and `AsyncThrowingStream.Continuation` values,
+    /// whose automatic `Sendable` derivation is not guaranteed under strict
+    /// concurrency. All reads and writes MUST go through
+    /// `internalState.withLock { ... }`.
+    private struct InternalState: @unchecked Sendable {
         var streamState: State = .idle
         var startContinuation: CheckedContinuation<Void, Error>?
         var shutdownContinuation: CheckedContinuation<Void, Never>?
         var receiveContinuation: AsyncThrowingStream<Data, Error>.Continuation?
+        var receiveStream: AsyncThrowingStream<Data, Error>?
     }
     private let internalState = OSAllocatedUnfairLock(initialState: InternalState())
     
@@ -120,8 +128,6 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
         }
     }
     
-    private var _receiveStream: AsyncThrowingStream<Data, Error>?
-
     /// An asynchronous stream of data received from the peer.
     ///
     /// Iterate over this property to receive data sent by the remote peer.
@@ -134,11 +140,12 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
     /// ```
     public var receive: AsyncThrowingStream<Data, Error> {
         internalState.withLock { state in
-            if let existing = _receiveStream {
+            if let existing = state.receiveStream {
                 return existing
             }
-            // Should not happen if initialized correctly
+            // Should not happen if initialized correctly.
             let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+            state.receiveStream = stream
             state.receiveContinuation = continuation
             return stream
         }
@@ -192,9 +199,11 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
     }
     
     private func initReceiveStream() {
-        let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
-        self._receiveStream = stream
-        internalState.withLock { $0.receiveContinuation = continuation }
+        internalState.withLock { state in
+            let (stream, continuation) = AsyncThrowingStream<Data, Error>.makeStream()
+            state.receiveStream = stream
+            state.receiveContinuation = continuation
+        }
     }
     
     /// Starts the stream.
@@ -459,11 +468,29 @@ public final class QuicStream: QuicObject, @unchecked Sendable {
     }
     
     deinit {
+        // Drain any pending continuations before closing the handle.
+        // All three continuations are pulled out under the lock and resumed
+        // outside to avoid deadlocks if the callback thread is racing us.
+        let (startCont, shutdownCont, recvCont) = internalState.withLock {
+            state -> (
+                CheckedContinuation<Void, Error>?,
+                CheckedContinuation<Void, Never>?,
+                AsyncThrowingStream<Data, Error>.Continuation?
+            ) in
+            let s = state.startContinuation
+            state.startContinuation = nil
+            let sh = state.shutdownContinuation
+            state.shutdownContinuation = nil
+            let r = state.receiveContinuation
+            state.receiveContinuation = nil
+            return (s, sh, r)
+        }
+        recvCont?.finish()
+        shutdownCont?.resume()
+        startCont?.resume(throwing: QuicError.aborted)
+
         if let handle = handle {
             api.StreamClose(handle)
         }
-        
-        internalState.withLock { $0.receiveContinuation }?.finish()
-        internalState.withLock { $0.shutdownContinuation }?.resume()
     }
 }
