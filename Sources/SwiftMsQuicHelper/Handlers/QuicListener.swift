@@ -7,7 +7,7 @@
 
 import Foundation
 import MsQuic
-import os
+import Synchronization
 
 /// A QUIC listener that accepts incoming connections from clients.
 ///
@@ -67,7 +67,7 @@ public final class QuicListener: QuicObject, @unchecked Sendable {
         var stopContinuation: CheckedContinuation<Void, Never>?
         var connectionHandler: ConnectionHandler?
     }
-    private let internalState = OSAllocatedUnfairLock(initialState: InternalState())
+    private let internalState = Mutex(InternalState())
 
     /// Creates a new listener.
     ///
